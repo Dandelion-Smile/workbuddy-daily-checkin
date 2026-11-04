@@ -1,0 +1,32 @@
+# Local configuration and credentials
+config.json
+config.tmp
+runtime-path.txt
+.env
+.env.*
+*.pem
+*.key
+*credentials*.json
+
+# Runtime state and logs
+*.log
+*.log.*
+last-success.json
+last-success.tmp
+mail-success.json
+mail-success.tmp
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.runtime/
+runtime/
+work/
+
+# Editor / OS files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,18 @@
+{
+  "workbuddy_exe": "%LOCALAPPDATA%\\Programs\\WorkBuddy\\WorkBuddy.exe",
+  "account_menu_name": "",
+  "claim_button_labels": [
+    "立即领取",
+    "立即领取 →",
+    "Claim Now",
+    "Claim Now →"
+  ],
+  "runtime_directory": "%LOCALAPPDATA%\\WorkBuddyDailyAutomation",
+  "email_notification": {
+    "enabled": false,
+    "smtp_host": "smtp.qq.com",
+    "smtp_port": 465,
+    "sender": "",
+    "recipient": ""
+  }
+}
