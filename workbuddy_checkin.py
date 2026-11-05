@@ -94,11 +94,69 @@ def unique(items, description):
 def find_window(exe):
     from pywinauto import Desktop
     expected = os.path.normcase(str(exe.resolve()))
-    matches = [w for w in Desktop(backend="uia").windows(title="WorkBuddy")
+    matches = [w for w in Desktop(backend="uia").windows(title="WorkBuddy", visible_only=False)
                if process_executable(w.process_id()) == expected]
     if len(matches) > 1:
         raise RuntimeError("Multiple WorkBuddy windows; manual review required")
     return matches[0] if matches else None
+
+
+def workbuddy_running(exe):
+    import win32process
+    expected = os.path.normcase(str(exe.resolve()))
+    return any(process_executable(pid) == expected
+               for pid in win32process.EnumProcesses() if pid)
+
+
+def get_or_launch_window(exe, timeout=60):
+    # Starting another copy is not a harmless way to activate this Electron app:
+    # its startup/repair code may run before the single-instance check.
+    window = find_window(exe)
+    if window is not None:
+        LOG.info("Using the existing WorkBuddy window; no process launched")
+        return window
+    if workbuddy_running(exe):
+        raise RuntimeError("WorkBuddy is already running without a usable window; open it manually. No second copy started")
+    LOG.info("WorkBuddy is not running; launching once")
+    subprocess.Popen([str(exe)], cwd=str(exe.parent), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        window = find_window(exe)
+        if window is not None:
+            return window
+        time.sleep(1)
+    raise RuntimeError("No WorkBuddy window after startup; no additional copy started")
+
+
+def focus_window(window):
+    import win32con
+    import win32gui
+    # Electron's top-level Pane may not expose the UIA Window pattern. Restore
+    # by native handle instead of relying on that optional pattern.
+    if win32gui.IsIconic(window.handle):
+        win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
+    try:
+        win32gui.SetForegroundWindow(window.handle)
+    except Exception:
+        window.set_focus()
+
+
+def profile_controls(window, config):
+    return [m for m in window.descendants(control_type="MenuItem")
+            if m.element_info.name == config["account_menu_name"]
+            and m.is_visible() and m.is_enabled()]
+
+
+def wait_account_ready(window, config, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        card = account_card(window, config)
+        profiles = profile_controls(window, config) if card is None else []
+        if card is not None or profiles:
+            return card, profiles
+        time.sleep(0.75)
+    raise RuntimeError("WorkBuddy interface is blank, repairing or not ready; stopped without clicking or restarting it")
 
 
 def account_card(window, config):
@@ -154,28 +212,10 @@ def wait_card(window, config, seconds):
 def perform_checkin(config, exe):
     if not desktop_unlocked():
         raise RuntimeError("Desktop locked or no interactive desktop; waiting for unlock")
-    # Electron's single-instance handler also restores the window from the tray.
-    subprocess.Popen([str(exe)], cwd=str(exe.parent), stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 60
-    window = None
-    while time.monotonic() < deadline:
-        window = find_window(exe)
-        if window is not None:
-            break
-        time.sleep(1)
-    if window is None:
-        raise RuntimeError("No WorkBuddy window after 60 seconds")
-    # set_focus restores supported windows and also handles Electron panes
-    # that do not expose the Window UI Automation pattern.
-    window.set_focus()
-    # Allow the existing login and daily reward status to finish loading.
-    time.sleep(3)
-    card = account_card(window, config)
+    window = get_or_launch_window(exe)
+    focus_window(window)
+    card, profiles = wait_account_ready(window, config)
     if card is None:
-        profiles = [m for m in window.descendants(control_type="MenuItem")
-                    if m.element_info.name == config["account_menu_name"]
-                    and m.is_visible() and m.is_enabled()]
         activate_control(unique(profiles, "account menu trigger (login may be expired)"))
         card = wait_card(window, config, 15)
     if card is None:
