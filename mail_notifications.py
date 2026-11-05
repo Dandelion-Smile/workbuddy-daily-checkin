@@ -49,8 +49,16 @@ def read_authorization_code(settings):
     try:
         saved = win32cred.CredRead(credential_target(settings), win32cred.CRED_TYPE_GENERIC)
         value = saved["CredentialBlob"]
-        secret = value.decode("utf-8") if isinstance(value, bytes) else value
-        if not secret or saved.get("UserName", "").lower() != settings["sender"].lower():
+        if isinstance(value, bytes):
+            # pywin32 CredWrite expects text and CredRead returns UTF-16LE
+            # bytes for that text. Keep UTF-8 compatibility for older stores.
+            encoding = "utf-16-le" if b"\x00" in value else "utf-8"
+            secret = value.decode(encoding)
+        else:
+            secret = value
+        if (not isinstance(secret, str) or len(secret) != 16 or not secret.isascii()
+                or not secret.isalnum()
+                or saved.get("UserName", "").lower() != settings["sender"].lower()):
             raise ValueError("Invalid credential")
         return secret
     except Exception:
@@ -66,6 +74,10 @@ def open_authenticated_connection(settings, secret):
                                       context=ssl.create_default_context())
         connection.login(settings["sender"], secret)
         return connection
+    except smtplib.SMTPAuthenticationError as error:
+        if connection is not None:
+            connection.close()
+        raise MailSendError(f"QQ SMTP 拒绝登录（SMTP {error.smtp_code}）。请确认授权码属于发件邮箱，且 SMTP 服务已开启。") from None
     except Exception as error:
         if connection is not None:
             connection.close()

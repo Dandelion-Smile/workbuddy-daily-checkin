@@ -1,6 +1,6 @@
 """Interactive local configuration. Never pass an authorization code on the command line."""
 import argparse
-from datetime import date
+from datetime import date, datetime
 from getpass import getpass
 import json
 import os
@@ -13,6 +13,57 @@ from mail_notifications import (MailConfigurationError, MailSendError, credentia
                                 mail_settings, open_authenticated_connection, send_test)
 
 BASE = Path(__file__).resolve().parent
+
+
+def setup_error_message(error):
+    if isinstance(error, (MailConfigurationError, MailSendError)):
+        return str(error)
+    code = getattr(error, "winerror", None)
+    suffix = f"，Windows 错误码 {code}" if isinstance(code, int) else ""
+    return f"本机配置失败（{type(error).__name__}{suffix}）。诊断记录见 email-setup.log。"
+
+
+def record_setup_failure(error):
+    # Log structured codes only. Raw exceptions can contain user input.
+    try:
+        directory = Path(os.environ.get("LOCALAPPDATA", str(BASE))) / "WorkBuddyDailyAutomation"
+        directory.mkdir(parents=True, exist_ok=True)
+        event = {"time": datetime.now().astimezone().isoformat(),
+                 "error_type": type(error).__name__,
+                 "winerror": getattr(error, "winerror", None)}
+        with (directory / "email-setup.log").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def configure_authorization(secret):
+    """Validate and save locally entered authorization without displaying it."""
+    secret = "".join(secret.split())
+    if not secret or len(secret) != 16 or not secret.isascii() or not secret.isalnum():
+        raise MailConfigurationError("需要 16 位 QQ 邮箱授权码，请重新输入。")
+    config_file = BASE / "config.json"
+    config = json.loads(config_file.read_text(encoding="utf-8-sig"))
+    settings = mail_settings(config)
+    connection = open_authenticated_connection(settings, secret)
+    connection.close()
+    current = json.loads(config_file.read_text(encoding="utf-8-sig"))
+    latest = mail_settings(current)
+    if any(latest[key] != settings[key] for key in ("sender", "recipient", "smtp_host", "smtp_port")):
+        raise MailConfigurationError("邮箱配置在输入期间被修改；请重新运行设置。")
+    import win32cred
+    win32cred.CredWrite({"Type": win32cred.CRED_TYPE_GENERIC,
+                         "TargetName": credential_target(settings),
+                         "UserName": settings["sender"],
+                         "CredentialBlob": secret,
+                         "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
+                         "Comment": "WorkBuddy daily check-in SMTP authorization"}, 0)
+    latest["enabled"] = True
+    current["email_notification"] = latest
+    temporary = config_file.with_suffix(".tmp")
+    temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(config_file)
+    return current
 
 
 def notify_confirmed_today(config):
@@ -56,29 +107,8 @@ def main():
     # Refuse getpass's echoing fallback if this is not a real interactive console.
     with warnings.catch_warnings():
         warnings.simplefilter("error", category=__import__("getpass").GetPassWarning)
-        secret = getpass("请输入 QQ 邮箱授权码，输入后按回车：").replace(" ", "").strip()
-    if not secret or len(secret) != 16 or not secret.isascii() or not secret.isalnum():
-        raise MailConfigurationError("需要 16 位 QQ 邮箱授权码，请重新运行设置")
-    # Check SMTP login before persisting the secret or enabling notifications.
-    connection = open_authenticated_connection(settings, secret)
-    connection.close()
-    # Preserve unrelated settings edited while the authorization prompt was open.
-    current = json.loads(config_file.read_text(encoding="utf-8-sig"))
-    latest = mail_settings(current)
-    if any(latest[key] != settings[key] for key in ("sender", "recipient", "smtp_host", "smtp_port")):
-        raise MailConfigurationError("邮箱配置在输入期间被修改；请重新运行设置")
-    import win32cred
-    win32cred.CredWrite({"Type": win32cred.CRED_TYPE_GENERIC,
-                         "TargetName": credential_target(settings),
-                         "UserName": settings["sender"],
-                         "CredentialBlob": secret.encode("utf-8"),
-                         "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
-                         "Comment": "WorkBuddy daily check-in SMTP authorization"}, 0)
-    latest["enabled"] = True
-    current["email_notification"] = latest
-    temporary = config_file.with_suffix(".tmp")
-    temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(config_file)
+        secret = getpass("请输入 QQ 邮箱授权码，输入后按回车：")
+    current = configure_authorization(secret)
     print("设置完成。授权码已保存在当前 Windows 用户的凭据管理器中。")
     notify_confirmed_today(current)
     print("日常领取脚本将继续发送通知；可双击 test-email.cmd 单独测试邮件。")
@@ -89,11 +119,17 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (MailConfigurationError, MailSendError) as error:
-        print(str(error))
+        record_setup_failure(error)
+        print(setup_error_message(error))
+        if sys.stdin and sys.stdin.isatty():
+            input("按回车关闭窗口。")
         sys.exit(1)
     except (KeyboardInterrupt, EOFError):
         print("已取消。")
         sys.exit(1)
     except Exception as error:
-        print(f"设置失败（{type(error).__name__}），请检查本机运行环境后重试。")
+        record_setup_failure(error)
+        print(setup_error_message(error))
+        if sys.stdin and sys.stdin.isatty():
+            input("按回车关闭窗口。")
         sys.exit(1)

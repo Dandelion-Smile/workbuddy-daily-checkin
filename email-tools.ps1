@@ -12,5 +12,10 @@ if ($NotifyNow) {
 }
 $helper = Join-Path $PSScriptRoot 'setup_email.py'
 if ($TestMail) { & $runtimePython $helper --test }
-else { & $runtimePython $helper }
+else {
+    $runtimePythonw = Join-Path (Split-Path -Parent $runtimePython) 'pythonw.exe'
+    $guiHelper = Join-Path $PSScriptRoot 'setup_email_gui.pyw'
+    Start-Process -FilePath $runtimePythonw -ArgumentList ('"' + $guiHelper + '"') -WorkingDirectory $PSScriptRoot -WindowStyle Normal
+    exit 0
+}
 exit $LASTEXITCODE
