@@ -74,7 +74,7 @@ python .\workbuddy_checkin.py --notify-only
 
 正式通知主题为「WorkBuddy 积分领取通知」，正文为：
 
-> 今日的workbuddyy积分已经领取
+> 今日的workbuddy积分已领取
 
 无论由脚本领取还是检查时发现已经手动领取，都可以发送当天确认邮件。正常情况下，同一个账号、收件地址每天发送一封。测试邮件不会占用当天的正式通知记录。
 

@@ -32,7 +32,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(mail.notify_success(self.config, self.runtime, self.day, 'already_claimed'), 'already_sent')
         send.assert_called_once()
         self.assertEqual(send.call_args.args[0]['recipient'], 'test-recipient@qq.com')
-        self.assertEqual(send.call_args.args[2], '今日的workbuddyy积分已经领取')
+        self.assertEqual(send.call_args.args[2], '今日的workbuddy积分已领取')
         credential.assert_called_once()
 
     @patch.object(mail, 'read_authorization_code', return_value='fake-test-secret')
@@ -77,7 +77,7 @@ class NotificationTests(unittest.TestCase):
         self.assertTrue(kwargs['context'].check_hostname)
         self.assertEqual(factory.call_args.args, ('smtp.qq.com', 465))
         message = connection.send_message.call_args.args[0]
-        self.assertEqual(message.get_content().strip(), '今日的workbuddyy积分已经领取')
+        self.assertEqual(message.get_content().strip(), '今日的workbuddy积分已领取')
         self.assertEqual(connection.send_message.call_args.kwargs['to_addrs'], ['test-recipient@qq.com'])
 
     @patch.object(mail.smtplib, 'SMTP_SSL')

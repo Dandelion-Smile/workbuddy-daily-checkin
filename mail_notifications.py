@@ -12,7 +12,7 @@ import smtplib
 import ssl
 
 LOG = logging.getLogger("workbuddy_daily")
-NOTICE = "今日的workbuddyy积分已经领取"
+NOTICE = "今日的workbuddy积分已领取"
 TEST_NOTICE = "WorkBuddy 邮件通知配置测试。这是一封测试邮件，不代表今日积分已经领取。"
 
 
