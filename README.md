@@ -60,7 +60,17 @@
 1. 在 `config.json` 中填入 `email_notification.sender` 和 `email_notification.recipient`；可以使用同一个 QQ 邮箱收发。
 2. 登录 QQ 邮箱网页版，在「设置 → 账号与安全」中按页面提示开启 SMTP 服务并获取授权码，参见 [QQ 邮箱官方说明](https://help.mail.qq.com/detail/0/1087)。
 3. 双击 `setup-email.cmd`，在本机窗口输入 16 位邮箱授权码。输入时不会显示字符，请使用授权码，不要使用 QQ 登录密码。
-4. 配置工具会验证 SMTP 登录，然后保存凭据并启用通知。可双击 `test-email.cmd` 发送标明「测试」的邮件。
+4. 配置工具会验证 SMTP 登录，然后保存凭据并启用通知。**如果今天已被脚本确认领取，会立即补发当天通知**；即使是在开启邮件功能之前领取，也会补发。可双击 `test-email.cmd` 发送标明「测试」的邮件。
+
+如果今天已经领取、但通知还没有发送，可双击 `notify-now.cmd`。该入口只读取当天的领取确认记录并补发邮件，不打开 WorkBuddy、不操作领取按钮；当天已经发送过则跳过。需要先完成邮箱授权配置。
+
+命令行等效入口：
+
+```powershell
+python .\workbuddy_checkin.py --notify-only
+```
+
+仅补发模式遇到未启用邮箱、缺少授权码或没有当天确认记录时会返回 `75`，不会误报发送成功。补发失败保留领取记录，下次可继续重试。
 
 正式通知主题为「WorkBuddy 积分领取通知」，正文为：
 
@@ -91,10 +101,10 @@
 
 尚未实测「未领取 → 点击 → 服务端确认到账」和「程序未运行时首次启动」的完整分支，也未使用真实邮箱授权码验证邮件投递。首次部署请自行确认一次结果。WorkBuddy 界面、活动或按钮文字变化后，可能需要更新配置或定位逻辑。
 
-包含 14 项模拟测试，覆盖重复启动防护、最小化窗口恢复、白屏停止、邮件每天去重、失败重试、领取结果持久化、TLS 设置和错误信息脱敏。测试不操作 WorkBuddy，也不发送真实邮件。在 Windows 上安装依赖后运行：
+包含 21 项模拟测试，覆盖重复启动防护、最小化窗口恢复、白屏停止、已领取通知补发、启用邮箱后自动补发、邮件每天去重、失败重试、领取结果持久化、TLS 设置和错误信息脱敏。测试不操作 WorkBuddy，也不发送真实邮件。在 Windows 上安装依赖后运行：
 
 ```powershell
-python -m unittest -v test_notifications.py test_launch_safety.py
+python -m unittest -v test_notifications.py test_launch_safety.py test_notify_only.py
 ```
 
 ## 公开仓库中的个人信息处理

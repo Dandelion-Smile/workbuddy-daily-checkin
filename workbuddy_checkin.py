@@ -244,16 +244,33 @@ def perform_checkin(config, exe):
     raise RuntimeError("Claim was attempted but success was not confirmed; retry later")
 
 
+def load_confirmed_success(config, exe, runtime, day):
+    """Read a check-in confirmed today for this exact account and installation."""
+    try:
+        last = json.loads((runtime / "last-success.json").read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if (isinstance(last, dict) and last.get("date") == day
+            and last.get("status") in {"claimed", "already_claimed"}
+            and last.get("account_menu_name") == config["account_menu_name"]
+            and last.get("exe") == str(exe)):
+        return last
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scheduled", action="store_true",
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--scheduled", action="store_true",
                         help="Run only at/after 10:00 and once successfully per day")
-    parser.add_argument("--validate", action="store_true",
+    mode.add_argument("--validate", action="store_true",
                         help="Validate configuration and dependency imports without controlling apps")
+    mode.add_argument("--notify-only", action="store_true",
+                      help="Send today's pending confirmation email from a verified result, without opening WorkBuddy")
     args = parser.parse_args()
     config, exe = load_config()
-    from pywinauto import Desktop  # noqa: F401 -- verify installation before scheduling
     if args.validate:
+        from pywinauto import Desktop  # noqa: F401 -- verify UI dependency only for validation
         if config.get("email_notification", {}).get("enabled", False):
             mail_settings(config)
         print("OK: configuration, WorkBuddy executable and pywinauto imports")
@@ -275,22 +292,24 @@ def main():
         now = datetime.now()
         today = now.date().isoformat()
         marker = runtime / "last-success.json"
+        if args.notify_only:
+            if not config.get("email_notification", {}).get("enabled", False):
+                raise RuntimeError("Email notification is not enabled; run setup-email.cmd first")
+            last = load_confirmed_success(config, exe, runtime, today)
+            if last is None:
+                raise RuntimeError("No confirmed check-in today for this account; no email sent and WorkBuddy was not opened")
+            LOG.info("Sending today's pending notification without opening WorkBuddy")
+            outcome = notify_success(config, runtime, today, last["status"])
+            LOG.info("Notification-only result: %s", outcome)
+            return 0
         if args.scheduled:
             if now.hour < 10:
                 return 0
-            if marker.exists():
-                try:
-                    last = json.loads(marker.read_text(encoding="utf-8"))
-                except (ValueError, OSError):
-                    last = None
-                if (isinstance(last, dict) and last.get("date") == today
-                        and last.get("status") in {"claimed", "already_claimed"}
-                        and last.get("account_menu_name") == config["account_menu_name"]
-                        and last.get("exe") == str(exe)):
-                    # The check-in already succeeded. Retry only its pending
-                    # email; do not reopen the app or claim a second time.
-                    notify_success(config, runtime, today, last["status"])
-                    return 0
+            last = load_confirmed_success(config, exe, runtime, today)
+            if last is not None:
+                # The check-in already succeeded. Retry only its pending email.
+                notify_success(config, runtime, today, last["status"])
+                return 0
         LOG.info("Starting daily check-in")
         result = perform_checkin(config, exe)
         # Do not mark a new calendar day if a run crossed midnight.

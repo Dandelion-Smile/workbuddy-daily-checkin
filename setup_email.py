@@ -1,8 +1,11 @@
 """Interactive local configuration. Never pass an authorization code on the command line."""
 import argparse
+from datetime import date
 from getpass import getpass
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import warnings
 
@@ -10,6 +13,27 @@ from mail_notifications import (MailConfigurationError, MailSendError, credentia
                                 mail_settings, open_authenticated_connection, send_test)
 
 BASE = Path(__file__).resolve().parent
+
+
+def notify_confirmed_today(config):
+    from workbuddy_checkin import load_confirmed_success
+    runtime = Path(os.path.expandvars(config["runtime_directory"]))
+    exe = Path(os.path.expandvars(config["workbuddy_exe"]))
+    if load_confirmed_success(config, exe, runtime, date.today().isoformat()) is None:
+        print("未找到今天已领取的确认记录；下次脚本确认领取后会发送通知。")
+        return
+    # The standard runner supplies the same single-instance lock and daily email
+    # deduplication as the scheduled task, without any desktop automation.
+    try:
+        result = subprocess.run([sys.executable, str(BASE / "workbuddy_checkin.py"), "--notify-only"],
+                                capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        print("授权已保存，但今日补发未能完成。请运行 notify-now.cmd 重试。")
+        return
+    if result.returncode == 0:
+        print("已执行今天的领取通知补发，请检查收件箱；当天已发送过则会跳过。")
+    else:
+        print("授权已保存，但今日通知补发失败。请查看 checkin.log，并运行 notify-now.cmd 重试。")
 
 
 def main():
@@ -56,7 +80,8 @@ def main():
     temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(config_file)
     print("设置完成。授权码已保存在当前 Windows 用户的凭据管理器中。")
-    print("日常领取脚本将发送通知；可双击 test-email.cmd 单独测试邮件。")
+    notify_confirmed_today(current)
+    print("日常领取脚本将继续发送通知；可双击 test-email.cmd 单独测试邮件。")
     return 0
 
 
