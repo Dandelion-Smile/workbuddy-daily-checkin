@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from collections import Counter
 from ctypes import wintypes
 from datetime import datetime
 import json
@@ -16,7 +17,6 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import time
 
@@ -91,24 +91,78 @@ def unique(items, description):
     return items[0]
 
 
-def find_window(exe):
-    from pywinauto import Desktop
+def native_window_handles(exe):
+    import win32gui
+    import win32process
     expected = os.path.normcase(str(exe.resolve()))
-    matches = [w for w in Desktop(backend="uia").windows(title="WorkBuddy", visible_only=False)
-               if process_executable(w.process_id()) == expected]
-    if len(matches) > 1:
+    handles = []
+    def collect(hwnd, unused):
+        try:
+            if (win32gui.GetClassName(hwnd) == "Chrome_WidgetWin_1"
+                    and win32gui.GetWindowText(hwnd).strip() == "WorkBuddy"):
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if process_executable(pid) == expected:
+                    handles.append(hwnd)
+        except Exception:
+            pass  # A window may disappear during Electron's splash transition.
+    win32gui.EnumWindows(collect, None)
+    return handles
+
+
+def find_window(exe):
+    import win32gui
+    import win32con
+    from pywinauto import Desktop
+    handles = native_window_handles(exe)
+    if len(handles) > 1:
         raise RuntimeError("Multiple WorkBuddy windows; manual review required")
-    return matches[0] if matches else None
+    if not handles:
+        return None
+    hwnd = handles[0]
+    # UIA top-level enumeration omits some hidden Electron/tray windows even
+    # with visible_only=False. Find the owned native HWND, restore, then bind UIA.
+    if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+        LOG.info("Restoring the hidden/minimized WorkBuddy native window")
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    return Desktop(backend="uia").window(handle=hwnd).wrapper_object()
 
 
 def workbuddy_running(exe):
-    import win32process
+    import win32com.client
     expected = os.path.normcase(str(exe.resolve()))
-    return any(process_executable(pid) == expected
-               for pid in win32process.EnumProcesses() if pid)
+    inventory = []
+    for process in win32com.client.GetObject("winmgmts:").ExecQuery(
+            "SELECT ProcessId,ParentProcessId,CommandLine FROM Win32_Process WHERE Name='WorkBuddy.exe'"):
+        pid = int(process.ProcessId)
+        if process_executable(pid) == expected:
+            inventory.append({"pid": pid, "parent": int(process.ParentProcessId),
+                              "command": str(process.CommandLine or "")})
+    return has_main_process(inventory)
 
 
-def get_or_launch_window(exe, timeout=60):
+def has_main_process(inventory):
+    pids = {process["pid"] for process in inventory}
+    for process in inventory:
+        command = process["command"]
+        if "--type=" in command or re.search(r"\.(?:cjs|mjs|js)(?:[\s\"]|$)", command, re.I):
+            continue
+        if process["parent"] in pids:
+            continue
+        return True
+    return False
+
+
+def launch_workbuddy(exe):
+    import win32api
+    import win32con
+    # Use the Windows GUI launcher (as Explorer does), rather than inheriting
+    # Python's redirected standard handles and scheduler startup window state.
+    result = win32api.ShellExecute(0, "open", str(exe), None, str(exe.parent), win32con.SW_SHOWNORMAL)
+    if result <= 32:
+        raise RuntimeError(f"Windows could not launch WorkBuddy (ShellExecute code {result})")
+
+
+def get_or_launch_window(exe, timeout=120):
     # Starting another copy is not a harmless way to activate this Electron app:
     # its startup/repair code may run before the single-instance check.
     window = find_window(exe)
@@ -118,8 +172,7 @@ def get_or_launch_window(exe, timeout=60):
     if workbuddy_running(exe):
         raise RuntimeError("WorkBuddy is already running without a usable window; open it manually. No second copy started")
     LOG.info("WorkBuddy is not running; launching once")
-    subprocess.Popen([str(exe)], cwd=str(exe.parent), stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    launch_workbuddy(exe)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         window = find_window(exe)
@@ -134,12 +187,25 @@ def focus_window(window):
     import win32gui
     # Electron's top-level Pane may not expose the UIA Window pattern. Restore
     # by native handle instead of relying on that optional pattern.
-    if win32gui.IsIconic(window.handle):
+    if not win32gui.IsWindowVisible(window.handle) or win32gui.IsIconic(window.handle):
         win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
     try:
         win32gui.SetForegroundWindow(window.handle)
     except Exception:
         window.set_focus()
+
+
+def ensure_foreground(window):
+    import win32gui
+    import win32process
+    from pywinauto.controls.hwndwrapper import HwndWrapper
+    foreground = win32gui.GetForegroundWindow()
+    if foreground and win32process.GetWindowThreadProcessId(foreground)[1] == window.process_id():
+        return
+    HwndWrapper(window.handle).set_focus()
+    foreground = win32gui.GetForegroundWindow()
+    if not foreground or win32process.GetWindowThreadProcessId(foreground)[1] != window.process_id():
+        raise RuntimeError("WorkBuddy did not become foreground; no click sent. Do not switch windows during UI execution")
 
 
 def profile_controls(window, config):
@@ -148,14 +214,49 @@ def profile_controls(window, config):
             and m.is_visible() and m.is_enabled()]
 
 
-def wait_account_ready(window, config, timeout=30):
+def diagnostic_snapshot(window, config):
+    import win32gui
+    try:
+        elements = window.descendants()
+        kinds = Counter(element.element_info.control_type for element in elements)
+        return {"visible": bool(win32gui.IsWindowVisible(window.handle)),
+                "minimized": bool(win32gui.IsIconic(window.handle)),
+                "control_count": len(elements), "control_types": dict(kinds),
+                "profile_matches": sum(element.element_info.name == config.get("account_menu_name") for element in elements),
+                "claim_buttons": sum(normalized(element.element_info.name) in {"立即领取", "ClaimNow"} for element in elements),
+                "claimed_buttons": sum(normalized(element.element_info.name) in {"今日已领", "今日已领取", "Claimedtoday"} for element in elements)}
+    except Exception as error:
+        return {"snapshot_error": type(error).__name__}
+
+
+def save_diagnostic(window, config, stage):
+    snapshot = diagnostic_snapshot(window, config)
+    LOG.info("UI diagnostics stage=%s summary=%s", stage, json.dumps(snapshot, ensure_ascii=False))
+    if config.get("runtime_directory"):
+        runtime = Path(os.path.expandvars(config["runtime_directory"]))
+        runtime.mkdir(parents=True, exist_ok=True)
+        data = {"time": datetime.now().astimezone().isoformat(), "stage": stage, "summary": snapshot}
+        (runtime / "last-diagnostic.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return snapshot
+
+
+def wait_account_ready(window, config, timeout=60, exe=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if exe is not None:
+            # Startup repair replaces the splash HWND with the real main HWND.
+            current = find_window(exe)
+            if current is None:
+                time.sleep(0.75)
+                continue
+            window = current
         card = account_card(window, config)
         profiles = profile_controls(window, config) if card is None else []
         if card is not None or profiles:
-            return card, profiles
+            LOG.info("UI ready: card=%s profile_controls=%d", card is not None, len(profiles))
+            return window, card, profiles
         time.sleep(0.75)
+    save_diagnostic(window, config, "account-not-ready")
     raise RuntimeError("WorkBuddy interface is blank, repairing or not ready; stopped without clicking or restarting it")
 
 
@@ -185,18 +286,23 @@ def claimed(menu):
 
 
 def activate_control(control):
-    # Resolve the supported pattern before invoking. Do not click again if an
-    # invocation raises after it may have reached the application.
-    from pywinauto.uia_defines import NoPatternInterfaceError
+    from pywinauto import Desktop
     if not desktop_unlocked():
         raise RuntimeError("Desktop locked before action")
-    try:
-        invoke = control.iface_invoke
-    except NoPatternInterfaceError:
-        # Fallback derives the click point from this specific live control.
-        control.click_input()
-    else:
-        invoke.Invoke()
+    window = control.top_level_parent()
+    ensure_foreground(window)
+    if not control.is_visible() or not control.is_enabled():
+        raise RuntimeError("Target control disappeared or became disabled; no click sent")
+    point = control.rectangle().mid_point()
+    actual = Desktop(backend="uia").from_point(point.x, point.y)
+    for _ in range(8):
+        if actual.element_info == control.element_info:
+            control.click_input(use_log=False)
+            return
+        actual = actual.parent()
+        if actual is None:
+            break
+    raise RuntimeError("The target is covered or stale; no click sent")
 
 
 def wait_card(window, config, seconds):
@@ -213,12 +319,17 @@ def perform_checkin(config, exe):
     if not desktop_unlocked():
         raise RuntimeError("Desktop locked or no interactive desktop; waiting for unlock")
     window = get_or_launch_window(exe)
+    LOG.info("Stage: restore-and-focus")
     focus_window(window)
-    card, profiles = wait_account_ready(window, config)
+    LOG.info("Stage: wait-for-account")
+    window, card, profiles = wait_account_ready(window, config, exe=exe)
     if card is None:
+        LOG.info("Stage: open-account-menu")
         activate_control(unique(profiles, "account menu trigger (login may be expired)"))
+        LOG.info("Stage: wait-for-reward-card")
         card = wait_card(window, config, 15)
     if card is None:
+        save_diagnostic(window, config, "card-not-found")
         raise RuntimeError("Buddy Refuel card unavailable; login, event or UI may have changed")
     if claimed(card):
         return "already_claimed"
@@ -229,18 +340,28 @@ def perform_checkin(config, exe):
     LOG.info("Claiming the daily reward")
     try:
         activate_control(button)
-    except Exception:
+    except Exception as error:
         # A transport/UI error can happen after a successful invocation.
         # Reobserve success below instead of repeating an uncertain click.
-        LOG.warning("Claim action outcome uncertain; verifying without a second click")
+        LOG.warning("Claim action outcome uncertain; verifying without a second click (type=%s hresult=%s winerror=%s)",
+                    type(error).__name__, getattr(error, "hresult", None), getattr(error, "winerror", None))
     deadline = time.monotonic() + 25
+    reopened = False
     while time.monotonic() < deadline:
         if not desktop_unlocked():
             raise RuntimeError("Desktop locked while verifying the reward")
         current = account_card(window, config)
         if current is not None and claimed(current):
+            LOG.info("Stage: claimed-status-confirmed")
             return "claimed"
+        if current is None and not reopened:
+            profiles = profile_controls(window, config)
+            if len(profiles) == 1:
+                LOG.info("Stage: reopen-account-menu-to-verify (no second claim)")
+                activate_control(profiles[0])
+                reopened = True
         time.sleep(0.75)
+    save_diagnostic(window, config, "claim-unconfirmed")
     raise RuntimeError("Claim was attempted but success was not confirmed; retry later")
 
 
@@ -267,6 +388,9 @@ def main():
                         help="Validate configuration and dependency imports without controlling apps")
     mode.add_argument("--notify-only", action="store_true",
                       help="Send today's pending confirmation email from a verified result, without opening WorkBuddy")
+    mode.add_argument("--diagnose", action="store_true",
+                      help="Restore/open WorkBuddy and save control counts without clicking claim or sending email")
+    parser.add_argument("--verbose", action="store_true", help="Also show stage logs in the console")
     args = parser.parse_args()
     config, exe = load_config()
     if args.validate:
@@ -277,6 +401,10 @@ def main():
         return 0
     runtime = Path(os.path.expandvars(config["runtime_directory"]))
     configure_logging(runtime)
+    if args.verbose:
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        LOG.addHandler(console)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.CreateMutexW.restype = wintypes.HANDLE
@@ -292,6 +420,13 @@ def main():
         now = datetime.now()
         today = now.date().isoformat()
         marker = runtime / "last-success.json"
+        if args.diagnose:
+            if not desktop_unlocked():
+                raise RuntimeError("Desktop must be unlocked for UI diagnostics")
+            window = get_or_launch_window(exe)
+            focus_window(window)
+            print(json.dumps(save_diagnostic(window, config, "manual-diagnosis"), ensure_ascii=False))
+            return 0
         if args.notify_only:
             if not config.get("email_notification", {}).get("enabled", False):
                 raise RuntimeError("Email notification is not enabled; run setup-email.cmd first")

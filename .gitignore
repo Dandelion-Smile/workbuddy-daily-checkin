@@ -15,6 +15,7 @@ last-success.json
 last-success.tmp
 mail-success.json
 mail-success.tmp
+last-diagnostic.json
 
 # Python environments and caches
 __pycache__/

@@ -63,7 +63,7 @@ $xml = @"
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled>
     <Hidden>false</Hidden><WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT3M</ExecutionTimeLimit><Priority>7</Priority>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit><Priority>7</Priority>
     <RestartOnFailure><Interval>PT10M</Interval><Count>3</Count></RestartOnFailure>
   </Settings>
   <Actions Context="Author"><Exec>
